@@ -190,4 +190,4 @@ LOGMEAL_API_KEY=votre_cle_optionnelle
 
 ## 📄 Licence
 
-MIT – Libre d'utilisation et de modification.
+CC 4.0
