@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { genId, compressImage, makeThumbnail, saveDish, saveRestaurant, getCurrentLocation, getRestaurants } from '../db.js';
 import StarRating from '../components/StarRating.jsx';
@@ -168,46 +168,73 @@ function ProgressBar({ stepIndex }) {
 
 // STEP 1: Photo capture
 function StepCapture({ onCapture, onBack, stepIndex }) {
-  const fileRef = useRef();
-  const videoRef = useRef();
+  const galleryRef = useRef();   // galerie – pas de capture attribute
+  const cameraRef  = useRef();   // caméra  – capture="environment"
+  const videoRef   = useRef();
   const [preview, setPreview] = useState(null);
-  const [mode, setMode] = useState('upload'); // 'upload' | 'camera'
+  const [nativeCamera, setNativeCamera] = useState(false); // mode viewfinder in-app
   const [stream, setStream] = useState(null);
-  const [capturing, setCapturing] = useState(false);
 
-  async function startCamera() {
+  // Détecte si getUserMedia est dispo (desktop/certains Android)
+  const canUseViewfinder = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
+
+  // Arrête le stream quand on quitte le composant
+  useEffect(() => {
+    return () => stream?.getTracks().forEach(t => t.stop());
+  }, [stream]);
+
+  /* ── Viewfinder in-app (desktop + Android Chrome) ── */
+  async function startViewfinder() {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      });
       setStream(s);
       if (videoRef.current) videoRef.current.srcObject = s;
-      setMode('camera');
+      setNativeCamera(true);
     } catch {
-      fileRef.current?.click();
+      // Fallback : input capture sur mobile si getUserMedia bloqué
+      cameraRef.current?.click();
     }
   }
 
-  function stopCamera() {
+  function stopViewfinder() {
     stream?.getTracks().forEach(t => t.stop());
     setStream(null);
-    setMode('upload');
+    setNativeCamera(false);
   }
 
-  function captureFromCamera() {
+  function captureFromViewfinder() {
+    const video = videoRef.current;
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-    canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    stopViewfinder();
     setPreview(dataUrl);
-    stopCamera();
   }
 
+  /* ── Lecture fichier (galerie ou input capture) ── */
   function handleFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Reset la valeur pour permettre de re-sélectionner le même fichier
+    e.target.value = '';
     const reader = new FileReader();
-    reader.onload = (ev) => setPreview(ev.target.result);
+    reader.onload = ev => setPreview(ev.target.result);
     reader.readAsDataURL(file);
+  }
+
+  /* ── Bouton "Utiliser la caméra" ── */
+  function handleCameraBtn() {
+    if (canUseViewfinder) {
+      // Desktop / Android → viewfinder natif (meilleure qualité)
+      startViewfinder();
+    } else {
+      // iOS Safari → input capture="environment" → ouvre directement l'appareil photo
+      cameraRef.current?.click();
+    }
   }
 
   return (
@@ -218,51 +245,94 @@ function StepCapture({ onCapture, onBack, stepIndex }) {
         <h2 className="scanner-title">Photographier un plat</h2>
         <p className="scanner-subtitle">Prenez ou choisissez une photo de votre plat</p>
 
-        {mode === 'camera' && !preview ? (
+        {/* ── Viewfinder in-app ── */}
+        {nativeCamera && !preview && (
           <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', background: '#000', marginBottom: 16, position: 'relative' }}>
-            <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', display: 'block', aspectRatio: '4/3', objectFit: 'cover' }} />
-            <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 16 }}>
-              <button onClick={stopCamera} className="btn btn-secondary">✕ Annuler</button>
-              <button onClick={captureFromCamera} className="btn btn-primary btn-lg" style={{ borderRadius: '50%', width: 64, height: 64, padding: 0, fontSize: '1.5rem' }}>📷</button>
-            </div>
-          </div>
-        ) : preview ? (
-          <div style={{ position: 'relative', marginBottom: 16 }}>
-            <img src={preview} alt="Aperçu" style={{ width: '100%', borderRadius: 'var(--radius-lg)', aspectRatio: '4/3', objectFit: 'cover' }} />
-            <button onClick={() => setPreview(null)} className="btn btn-secondary btn-sm" style={{ position: 'absolute', top: 10, right: 10, background: 'rgba(255,255,255,0.9)' }}>✕ Rechoisir</button>
-          </div>
-        ) : (
-          <div style={{ marginBottom: 16 }}>
-            <div className="photo-upload-area" onClick={() => fileRef.current?.click()}>
-              <div style={{ fontSize: '3rem' }}>📸</div>
-              <p style={{ fontWeight: 600, color: 'var(--text-2)' }}>Tap pour choisir une photo</p>
-              <p className="text-muted text-sm">JPEG, PNG – max 10 Mo</p>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{ width: '100%', display: 'block', aspectRatio: '4/3', objectFit: 'cover' }}
+            />
+            {/* Grille de composition */}
+            <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
+              backgroundImage: 'linear-gradient(rgba(255,255,255,0.12) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.12) 1px, transparent 1px)',
+              backgroundSize: '33.33% 33.33%' }}
+            />
+            <div style={{ position: 'absolute', bottom: 20, left: 0, right: 0, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24 }}>
+              <button onClick={stopViewfinder} className="btn btn-secondary" style={{ background: 'rgba(255,255,255,0.85)' }}>✕</button>
+              {/* Bouton déclencheur */}
+              <button
+                onClick={captureFromViewfinder}
+                style={{ width: 70, height: 70, borderRadius: '50%', background: 'white', border: '4px solid rgba(255,255,255,0.5)', boxShadow: '0 4px 20px rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.8rem' }}
+              >📷</button>
+              <div style={{ width: 60 }} />{/* spacer */}
             </div>
           </div>
         )}
 
-        <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
+        {/* ── Aperçu après capture ── */}
+        {preview && (
+          <div style={{ position: 'relative', marginBottom: 16 }}>
+            <img src={preview} alt="Aperçu" style={{ width: '100%', borderRadius: 'var(--radius-lg)', aspectRatio: '4/3', objectFit: 'cover', display: 'block' }} />
+            <button onClick={() => setPreview(null)} className="btn btn-secondary btn-sm" style={{ position: 'absolute', top: 10, right: 10, background: 'rgba(255,255,255,0.92)' }}>✕ Rechoisir</button>
+          </div>
+        )}
 
+        {/* ── Zone de dépôt (état initial) ── */}
+        {!nativeCamera && !preview && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="photo-upload-area" onClick={() => galleryRef.current?.click()}>
+              <div style={{ fontSize: '3rem' }}>📸</div>
+              <p style={{ fontWeight: 600, color: 'var(--text-2)' }}>Tap pour choisir une photo</p>
+              <p className="text-muted text-sm">JPEG, PNG – depuis la galerie</p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Inputs cachés ── */}
+        {/* Galerie uniquement – PAS de capture attribute */}
+        <input
+          ref={galleryRef}
+          type="file"
+          accept="image/*"
+          onChange={handleFile}
+          style={{ display: 'none' }}
+        />
+        {/* Caméra uniquement – capture="environment" → appareil photo arrière directement */}
+        <input
+          ref={cameraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleFile}
+          style={{ display: 'none' }}
+        />
+
+        {/* ── Boutons d'action ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {preview ? (
             <button className="btn btn-primary btn-full btn-lg" onClick={() => onCapture(preview)}>
-              Analyser ce plat →
+              🔍 Analyser ce plat →
             </button>
-          ) : (
+          ) : !nativeCamera ? (
             <>
-              <button className="btn btn-primary btn-full btn-lg" onClick={() => fileRef.current?.click()}>
-                📂 Choisir depuis la galerie
+              <button className="btn btn-primary btn-full btn-lg" onClick={handleCameraBtn}>
+                📷 Utiliser l'appareil photo
               </button>
-              <button className="btn btn-secondary btn-full" onClick={startCamera}>
-                📷 Utiliser la caméra
+              <button className="btn btn-secondary btn-full" onClick={() => galleryRef.current?.click()}>
+                🖼 Choisir depuis la galerie
               </button>
             </>
-          )}
+          ) : null}
         </div>
 
-        <div style={{ marginTop: 20, padding: 14, background: 'var(--surface-2)', borderRadius: 'var(--radius)', fontSize: '0.82rem', color: 'var(--text-3)' }}>
-          <strong style={{ color: 'var(--text-2)' }}>💡 Conseils :</strong> Photo nette, bien éclairée, centrée sur le plat. Évitez les contre-jours.
-        </div>
+        {!nativeCamera && !preview && (
+          <div style={{ marginTop: 20, padding: 14, background: 'var(--surface-2)', borderRadius: 'var(--radius)', fontSize: '0.82rem', color: 'var(--text-3)' }}>
+            <strong style={{ color: 'var(--text-2)' }}>💡 Conseils :</strong> Photo nette, bien éclairée, centrée sur le plat. Évitez les contre-jours.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -768,4 +838,4 @@ function StepSave({ data, onChange, photo, recipe, setupData, restaurants, onSav
       </div>
     </div>
   );
-}
+              }
